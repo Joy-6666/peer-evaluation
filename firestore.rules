@@ -1,0 +1,67 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function admin() {
+      return signedIn() && request.auth.token.email in ['jau@go.ypmhs.tyc.edu.tw'];
+    }
+    function currentLimit() {
+      return exists(/databases/$(database)/documents/settings/main)
+        ? get(/databases/$(database)/documents/settings/main).data.voteLimit
+        : 4;
+    }
+    match /settings/main {
+      allow read: if true;
+      allow write: if admin();
+    }
+    match /works/{workId} {
+      allow read: if true;
+      allow create: if signedIn() && get(/databases/$(database)/documents/settings/main).data.uploadsOpen == true
+        && request.resource.data.authorUid == request.auth.uid
+        && request.resource.data.image.size() < 950000;
+      allow update: if admin() || (signedIn() && resource.data.authorUid == request.auth.uid
+        && get(/databases/$(database)/documents/settings/main).data.uploadsOpen == true
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title','description','category','image','updatedAt'])
+        && request.resource.data.image.size() < 950000);
+      allow delete: if admin();
+    }
+    match /tallies/{workId} {
+      allow read: if admin() || !exists(/databases/$(database)/documents/settings/main)
+        || get(/databases/$(database)/documents/settings/main).data.showVotes == true;
+      allow create: if signedIn() && request.resource.data.count == 0
+        && getAfter(/databases/$(database)/documents/works/$(workId)).data.authorUid == request.auth.uid;
+      allow update: if admin() || validVoteChange(workId);
+      allow delete: if admin();
+    }
+    function validVoteChange(workId) {
+      let ballotPath = /databases/$(database)/documents/ballots/$(request.auth.uid);
+      let beforeIds = exists(ballotPath) ? get(ballotPath).data.workIds.toSet() : [].toSet();
+      let afterIds = getAfter(ballotPath).data.workIds.toSet();
+      let added = afterIds.difference(beforeIds);
+      let removed = beforeIds.difference(afterIds);
+      let isAdding = added.size() == 1 && workId in added;
+      let isRemoving = removed.size() == 1 && workId in removed;
+      return signedIn() && get(/databases/$(database)/documents/settings/main).data.votingOpen == true
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['count'])
+        && ((isAdding && request.resource.data.count == resource.data.count + 1)
+          || (isRemoving && request.resource.data.count == resource.data.count - 1));
+    }
+    match /ballots/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || admin());
+      allow create: if signedIn() && request.auth.uid == uid
+        && get(/databases/$(database)/documents/settings/main).data.votingOpen == true
+        && request.resource.data.workIds.size() <= currentLimit()
+        && request.resource.data.workIds.toSet().size() == request.resource.data.workIds.size()
+        && request.resource.data.voterEmail == request.auth.token.email;
+      allow update: if admin() || (signedIn() && request.auth.uid == uid
+        && get(/databases/$(database)/documents/settings/main).data.votingOpen == true
+        && (request.resource.data.workIds.size() <= currentLimit()
+          || request.resource.data.workIds.size() < resource.data.workIds.size())
+        && request.resource.data.workIds.toSet().size() == request.resource.data.workIds.size()
+        && request.resource.data.voterEmail == request.auth.token.email
+        && request.resource.data.workIds.toSet().difference(resource.data.workIds.toSet()).size()
+          + resource.data.workIds.toSet().difference(request.resource.data.workIds.toSet()).size() == 1);
+      allow delete: if admin();
+    }
+  }
+}

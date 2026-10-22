@@ -1,0 +1,110 @@
+import './style.css';
+import { auth, db, firebaseReady, googleProvider, adminEmails } from './firebase.js';
+import { onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
+import { collection, doc, getDocs, increment, onSnapshot, orderBy, query, runTransaction, serverTimestamp, setDoc, updateDoc, writeBatch } from 'firebase/firestore';
+
+const app = document.querySelector('#app');
+const defaultSettings = { uploadsOpen: true, votingOpen: true, showVotes: true, voteLimit: 4 };
+let user = null;
+let works = [];
+let votes = [];
+let tallies = {};
+let settings = defaultSettings;
+let adminView = false;
+let editingId = null;
+let stopListeners = [];
+let stopTallies = null;
+let search = '';
+let toastTimer;
+const isAdmin = () => !!user?.email && adminEmails.includes(user.email.toLowerCase());
+const esc = (value = '') => String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
+const initials = (name = '同學') => [...name].slice(0, 1).join('');
+
+function render() {
+  const votedIds = new Set(votes.map((vote) => vote.workId));
+  const visibleWorks = [...works].filter((work) => `${work.title} ${work.description} ${work.authorName}`.toLowerCase().includes(search.toLowerCase())).sort((a, b) => (tallies[b.id]?.count || 0) - (tallies[a.id]?.count || 0));
+  const myVotes = votes.length;
+  app.innerHTML = `
+    <header class="topbar"><a class="brand" href="#"><span class="brand-mark">拾</span><span>拾<span class="brand-light">光</span><small> CAMPUS ART SHOW</small></span></a><nav><a class="nav-link active" href="#gallery">作品展</a><a class="nav-link" href="#about">活動介紹</a>${isAdmin() ? `<button class="nav-link admin-link ${adminView ? 'chosen' : ''}" data-action="admin">${adminView ? '返回作品展' : '管理後台'}</button>` : ''}</nav><div class="profile">${user ? `<span class="avatar">${esc(initials(user.displayName))}</span><span class="profile-name">${esc(user.displayName || user.email)}</span><button class="text-button" data-action="signout">登出</button>` : `<button class="btn btn-outline btn-small" data-action="signin">登入 / 投稿</button>`}</div><button class="mobile-menu" aria-label="開啟選單">☰</button></header>
+    ${firebaseReady ? '' : `<div class="config-notice"><b>Firebase 尚未設定</b><span>建立 .env.local 並填入 Firebase Web App 設定，即可啟用登入、即時資料與投票功能。</span></div>`}
+    ${adminView && isAdmin() ? renderAdmin() : renderGallery(visibleWorks, votedIds, myVotes)}
+    <footer id="about"><div class="footer-brand"><span class="brand-mark">拾</span><span>拾光・校園作品展</span></div><span>每一份創作，都值得被看見。 © 2025 Campus Art Show</span><span>以熱情創作・以欣賞交流</span></footer><div id="toast" class="toast" role="status"></div>
+    ${editingId ? renderEditor(works.find((work) => work.id === editingId)) : ''}`;
+}
+
+function renderGallery(items, votedIds, myVotes) {
+  const closed = !settings.votingOpen;
+  return `<main id="gallery"><section class="hero"><div class="hero-art hero-art-one"></div><div class="hero-art hero-art-two"></div><div class="hero-content"><p class="eyebrow"><span></span> CAMPUS ART SHOW · 2025</p><h1>讓創意，<em>發生共鳴。</em></h1><p class="hero-subtitle">每一份作品，都是一個獨特的視角。<br>來看看同學們的創作，為你最喜歡的作品投下一票。</p><div class="hero-actions"><a class="btn btn-primary" href="#gallery-list">探索作品 <span>↓</span></a>${user && settings.uploadsOpen ? '<button class="btn btn-cream" data-action="new-work">＋ 上傳作品</button>' : ''}</div><div class="hero-note"><span class="note-avatars"><i>林</i><i>王</i><i>陳</i></span><span>邀請你，一起為創意喝采</span></div></div><div class="hero-sticker">${works.length.toString().padStart(2, '0')}<small>件創作</small></div><span class="hero-index">01 — 03 &nbsp; / &nbsp; CREATIVE MINDS</span></section>
+  <section class="gallery-section" id="gallery-list"><div class="section-heading"><div><p class="eyebrow eyebrow-muted">THE GALLERY</p><h2>探索創作 <span class="count">${String(works.length).padStart(2, '0')}</span></h2></div><div class="heading-tools"><div class="voting-status ${closed ? 'status-closed' : ''}"><i></i>${closed ? '投票已截止' : '投票進行中'}</div><label class="search"><span>⌕</span><input id="search" placeholder="搜尋作品、作者..." value="${esc(search)}" /></label><select class="sort-select" id="sort"><option value="popular">最受歡迎</option><option value="newest">最新上傳</option></select></div></div>
+  <div class="gallery-layout"><div class="work-grid">${items.length ? items.map((work, i) => renderCard(work, votedIds.has(work.id), i)).join('') : `<div class="empty-state"><div>✳</div><h3>舞台已準備就緒</h3><p>成為第一個分享創作的人吧。</p>${user && settings.uploadsOpen ? '<button class="btn btn-primary" data-action="new-work">＋ 上傳作品</button>' : ''}</div>`}</div>
+  <aside class="sidebar"><div class="vote-panel"><div class="vote-panel-top"><span class="vote-icon">✳</span><span class="live-tag"><i></i> 即時投票</span></div><p class="eyebrow">YOUR VOTE</p><h3>選出你的<br>最愛作品。</h3><p class="panel-copy">為喜歡的創作投下一票，<br>讓更多人看見它的光芒。</p><div class="vote-counter"><span>已使用票數</span><strong>${myVotes}<small>/${settings.voteLimit}</small></strong></div><div class="vote-progress">${Array.from({ length: Math.min(Math.max(settings.voteLimit, 0), 10) }, (_, i) => `<i class="${i < myVotes ? 'filled' : ''}"></i>`).join('')}</div><p class="vote-tip">${closed ? '投票已截止，感謝你的參與！' : settings.showVotes ? `你還有 ${Math.max(0, settings.voteLimit - myVotes)} 票可以使用` : '票數暫時隱藏，盡情欣賞作品吧'}</p>${!user ? '<button class="btn btn-primary btn-full" data-action="signin">登入後開始投票 ↗</button>' : ''}</div><div class="notice-card"><span>✧</span><div><b>創作小提醒</b><p>請尊重每一份創作，<br>保持友善的交流空間。</p></div></div></aside></div>
+  ${!user ? `<div class="bottom-cta"><div><b>有好點子想分享？</b><p>登入後即可上傳你的作品。</p></div><button class="btn btn-primary" data-action="signin">登入並投稿 <span>↗</span></button></div>` : ''}</section></main>`;
+}
+
+function renderCard(work, voted, index) {
+  const image = work.image || `https://images.unsplash.com/photo-${['1531058020387-3be344556be6','1513364776144-60967b0f800f','1547826039-bfc35e0f1ea8','1513519245088-0e12902e5a38'][index % 4]}?auto=format&fit=crop&w=900&q=85`;
+  return `<article class="work-card ${voted ? 'is-voted' : ''}"><div class="work-image"><img src="${esc(image)}" alt="${esc(work.title)}" loading="lazy"/><span class="category-tag">${esc(work.category || '平面設計')}</span>${user?.uid === work.authorUid ? `<button class="edit-work" data-action="edit-work" data-id="${esc(work.id)}" aria-label="編輯作品">✎</button>` : ''}<button class="vote-button ${voted ? 'voted' : ''}" data-action="vote" data-id="${esc(work.id)}" aria-label="${voted ? '取消投票' : '投票'}">${voted ? '♥' : '♡'}</button></div><div class="work-info"><div class="work-title-row"><h3>${esc(work.title || '未命名作品')}</h3><span class="vote-count">${settings.showVotes ? `${tallies[work.id]?.count || 0} <small>票</small>` : '? <small>票</small>'}</span></div><p class="work-description">${esc(work.description || '創作理念尚未填寫。')}</p><div class="work-author"><span class="author-avatar">${esc(initials(work.authorName))}</span><span>${esc(work.authorName || '匿名同學')}</span><span class="work-date">${work.createdAt?.toDate ? work.createdAt.toDate().toLocaleDateString('zh-TW') : '剛剛'}</span></div></div></article>`;
+}
+
+function renderAdmin() {
+  return `<main class="admin-page"><div class="admin-header"><div><p class="eyebrow eyebrow-muted">ADMINISTRATION</p><h1>活動管理</h1><p>即時掌握投稿與投票狀況。</p></div><button class="btn btn-outline" data-action="export">下載票數報表 ↓</button></div><div class="stats-row"><div class="stat-card"><span>作品總數</span><b>${works.length}</b><small>件投稿作品</small></div><div class="stat-card"><span>累積投票</span><b>${Object.values(tallies).reduce((sum, tally) => sum + (tally.count || 0), 0)}</b><small>張有效選票</small></div><div class="stat-card"><span>投票狀態</span><b class="stat-status">${settings.votingOpen ? '進行中' : '已截止'}</b><small>${settings.showVotes ? '票數公開' : '盲測模式'}</small></div></div><section class="control-panel"><div class="panel-heading"><div><p class="eyebrow eyebrow-muted">CONTROL PANEL</p><h2>活動設定</h2></div><span class="live-tag"><i></i> 即時同步</span></div><div class="control-row"><div><b>開放作品投稿</b><p>允許使用者新增與編輯作品</p></div><button class="toggle ${settings.uploadsOpen ? 'on' : ''}" data-action="toggle-setting" data-key="uploadsOpen" role="switch" aria-checked="${settings.uploadsOpen}"></button></div><div class="control-row"><div><b>開放投票</b><p>關閉後，使用者將無法投票</p></div><button class="toggle ${settings.votingOpen ? 'on' : ''}" data-action="toggle-setting" data-key="votingOpen" role="switch" aria-checked="${settings.votingOpen}"></button></div><div class="control-row"><div><b>公開得票數</b><p>關閉後進入盲測模式，票數顯示為 ?</p></div><button class="toggle ${settings.showVotes ? 'on' : ''}" data-action="toggle-setting" data-key="showVotes" role="switch" aria-checked="${settings.showVotes}"></button></div><div class="control-row"><div><b>每人可投票數</b><p>調整每位使用者的票數上限</p></div><div class="limit-control"><button data-action="limit" data-delta="-1">−</button><b>${settings.voteLimit}</b><button data-action="limit" data-delta="1">＋</button></div></div></section><section class="admin-works"><div class="panel-heading"><div><p class="eyebrow eyebrow-muted">SUBMISSIONS</p><h2>作品管理 <span class="count">${works.length}</span></h2></div></div><div class="admin-table-wrap"><table><thead><tr><th>作品</th><th>作者</th><th>得票</th><th>管理</th></tr></thead><tbody>${works.length ? works.map((w) => `<tr><td><span class="table-work"><img src="${esc(w.image || '')}" alt=""/><span><b>${esc(w.title)}</b><small>${esc(w.category || '作品')}</small></span></span></td><td>${esc(w.authorName)}</td><td>${tallies[w.id]?.count || 0}</td><td><button class="danger-link" data-action="delete-work" data-id="${esc(w.id)}">刪除</button></td></tr>`).join('') : '<tr><td colspan="4" class="table-empty">目前沒有作品</td></tr>'}</tbody></table></div></section><section class="admin-works"><div class="panel-heading"><div><p class="eyebrow eyebrow-muted">VOTING LOGS</p><h2>投票明細</h2></div><button class="text-button" data-action="export-logs">下載明細 CSV ↓</button></div><p class="admin-hint">每筆選票依 Google 帳號匿名識別，同一位使用者的 Email 僅管理員可見。</p></section><section class="danger-zone"><div><b>危險操作</b><p>重設投票會清除所有票數；清空作品則無法復原。</p></div><div><button class="btn btn-outline" data-action="reset-votes">歸零所有票數</button><button class="btn btn-danger" data-action="clear-works">清空所有作品</button></div></section></main>`;
+}
+
+function renderEditor(work) {
+  return `<div class="modal-backdrop" data-action="close-editor"><form class="editor-modal" id="work-form"><button type="button" class="modal-close" data-action="close-editor">×</button><p class="eyebrow eyebrow-muted">${work ? 'EDIT YOUR WORK' : 'SHARE YOUR CREATION'}</p><h2>${work ? '編輯作品' : '分享你的創作'}</h2><label>作品名稱<input name="title" maxlength="60" required value="${esc(work?.title || '')}" placeholder="替作品取個名字"/></label><label>作品類別<select name="category"><option>平面設計</option><option>攝影</option><option>插畫</option><option>數位藝術</option><option>其他創作</option></select></label><label>創作理念<textarea name="description" maxlength="500" rows="4" placeholder="和大家分享你的創作想法...">${esc(work?.description || '')}</textarea></label><label class="upload-box">${work?.image ? `<img class="upload-preview" src="${esc(work.image)}" alt="目前作品圖片"/>` : '<span class="upload-plus">＋</span>'}<span class="upload-label">${work?.image ? '點擊更換圖片' : '上傳作品圖片'}</span><small>支援 JPG、PNG，將自動壓縮</small><input type="file" name="image" accept="image/*" hidden /></label><button class="btn btn-primary btn-full" type="submit">${work ? '儲存修改' : '發布作品'} <span>↗</span></button></form></div>`;
+}
+
+function toast(message) { const el = document.querySelector('#toast'); if (!el) return; el.textContent = message; el.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove('show'), 3000); }
+async function login() { if (!firebaseReady) return toast('請先設定 Firebase 環境變數'); try { await signInWithPopup(auth, googleProvider); } catch (error) { toast(error.message); } }
+async function compressImage(file) { if (!file) return ''; if (!file.type.startsWith('image/')) throw new Error('請選擇圖片檔案'); const bitmap = await createImageBitmap(file); const scale = Math.min(1, 1400 / Math.max(bitmap.width, bitmap.height)); const canvas = document.createElement('canvas'); canvas.width = Math.round(bitmap.width * scale); canvas.height = Math.round(bitmap.height * scale); canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height); return canvas.toDataURL('image/jpeg', 0.78); }
+
+async function submitWork(event) { event.preventDefault(); const form = event.currentTarget; const data = new FormData(form); const button = form.querySelector('[type="submit"]'); button.disabled = true; button.textContent = '處理中…'; try { const imageFile = data.get('image'); const existingWork = editingId && editingId !== 'new' ? works.find((w) => w.id === editingId) : null; const image = imageFile?.size ? await compressImage(imageFile) : existingWork?.image || ''; if (!image) throw new Error('請上傳作品圖片'); const payload = { title: data.get('title').trim(), description: data.get('description').trim(), category: data.get('category'), image, updatedAt: serverTimestamp() }; if (existingWork) await updateDoc(doc(db, 'works', editingId), payload); else { const workRef = doc(collection(db, 'works')); const batch = writeBatch(db); batch.set(workRef, { ...payload, authorUid: user.uid, authorName: user.displayName || user.email, createdAt: serverTimestamp() }); batch.set(doc(db, 'tallies', workRef.id), { count: 0 }); await batch.commit(); } editingId = null; render(); toast('作品已儲存'); } catch (error) { toast(error.message || '儲存失敗'); button.disabled = false; button.textContent = editingId && editingId !== 'new' ? '儲存修改' : '發布作品 ↗'; } }
+
+async function toggleVote(workId) { if (!user) return login(); if (!settings.votingOpen) return toast('目前已停止投票'); const alreadyVoted = votes.some((vote) => vote.workId === workId); if (!alreadyVoted && votes.length >= settings.voteLimit) return toast(`每人最多可以投 ${settings.voteLimit} 票`); try { await runTransaction(db, async (tx) => { const ballotRef = doc(db, 'ballots', user.uid); const ballotSnap = await tx.get(ballotRef); const ballot = ballotSnap.exists() ? ballotSnap.data().workIds || [] : []; const currentSettings = (await tx.get(doc(db, 'settings', 'main'))).data() || defaultSettings; const workSnap = await tx.get(doc(db, 'works', workId)); if (!workSnap.exists()) throw new Error('作品不存在'); if (!currentSettings.votingOpen) throw new Error('投票已截止'); const currentlyVoted = ballot.includes(workId); if (!currentlyVoted && ballot.length >= currentSettings.voteLimit) throw new Error(`每人最多可以投 ${currentSettings.voteLimit} 票`); const next = currentlyVoted ? ballot.filter((id) => id !== workId) : [...ballot, workId]; tx.set(ballotRef, { workIds: next, voterName: user.displayName || user.email, voterEmail: user.email, updatedAt: serverTimestamp() }); tx.update(doc(db, 'tallies', workId), { count: increment(currentlyVoted ? -1 : 1) }); }); } catch (error) { toast(error.message || '投票失敗'); } }
+
+async function saveSetting(key, value) { try { await setDoc(doc(db, 'settings', 'main'), { ...settings, [key]: value, updatedAt: serverTimestamp() }, { merge: true }); } catch (error) { toast(error.message || '設定儲存失敗'); } }
+async function loadLogs() { const snapshot = await getDocs(collection(db, 'ballots')); return snapshot.docs.flatMap((entry) => (entry.data().workIds || []).map((workId) => ({ workId, voterName: entry.data().voterName || '', voterEmail: entry.data().voterEmail || '', uid: entry.id }))); }
+function downloadCsv(name, rows) { const csv = '\ufeff' + rows.map((row) => row.map((cell) => `"${String(cell ?? '').replaceAll('"', '""')}"`).join(',')).join('\r\n'); const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' })); const link = document.createElement('a'); link.href = url; link.download = name; link.click(); URL.revokeObjectURL(url); }
+async function exportResults() { downloadCsv('校園作品投票結果.csv', [['作品 ID', '作品名稱', '作者', '創作理念', '得票數'], ...[...works].sort((a, b) => (tallies[b.id]?.count || 0) - (tallies[a.id]?.count || 0)).map((w) => [w.id, w.title, w.authorName, w.description, tallies[w.id]?.count || 0])]); }
+async function exportLogs() { try { const logs = await loadLogs(); const byId = Object.fromEntries(works.map((w) => [w.id, w])); downloadCsv('校園作品投票明細.csv', [['投票者', 'Email', '作品 ID', '作品名稱'], ...logs.map((log) => [log.voterName, log.voterEmail, log.workId, byId[log.workId]?.title || '作品已刪除'])]); } catch (error) { toast(error.message || '讀取明細失敗'); } }
+
+async function deleteWork(id) { if (!confirm('確定刪除這件作品嗎？此操作無法復原。')) return; try { const batch = writeBatch(db); batch.delete(doc(db, 'works', id)); batch.delete(doc(db, 'tallies', id)); const ballots = await getDocs(collection(db, 'ballots')); ballots.docs.filter((entry) => (entry.data().workIds || []).includes(id)).forEach((entry) => batch.update(entry.ref, { workIds: entry.data().workIds.filter((workId) => workId !== id) })); await batch.commit(); toast('作品已刪除'); } catch (error) { toast(error.message || '刪除失敗'); } }
+async function resetVotes() { if (!confirm('確定歸零所有票數並清除投票紀錄嗎？')) return; try { const [tallySnap, ballotSnap] = await Promise.all([getDocs(collection(db, 'tallies')), getDocs(collection(db, 'ballots'))]); for (let i = 0; i < Math.max(tallySnap.size, ballotSnap.size); i += 400) { const batch = writeBatch(db); tallySnap.docs.slice(i, i + 400).forEach((entry) => batch.update(entry.ref, { count: 0 })); ballotSnap.docs.slice(i, i + 400).forEach((entry) => batch.update(entry.ref, { workIds: [] })); await batch.commit(); } toast('所有票數已歸零'); } catch (error) { toast(error.message || '重設失敗'); } }
+async function clearWorks() { if (!confirm('確定清空所有作品與投票紀錄？此操作無法復原。')) return; try { const [workSnap, tallySnap, ballotSnap] = await Promise.all([getDocs(collection(db, 'works')), getDocs(collection(db, 'tallies')), getDocs(collection(db, 'ballots'))]); const docs = [...workSnap.docs, ...tallySnap.docs, ...ballotSnap.docs]; for (let i = 0; i < docs.length; i += 400) { const batch = writeBatch(db); docs.slice(i, i + 400).forEach((entry) => batch.delete(entry.ref)); await batch.commit(); } toast('活動資料已清空'); } catch (error) { toast(error.message || '清空失敗'); } }
+
+app.addEventListener('click', async (event) => { const actionEl = event.target.closest('[data-action]'); if (!actionEl) { if (event.target.classList.contains('modal-backdrop')) { editingId = null; render(); } return; } const { action, id, key } = actionEl.dataset; if (action === 'signin') return login(); if (action === 'signout') return signOut(auth); if (action === 'admin') { adminView = !adminView; render(); } if (action === 'new-work') { if (!user) return login(); if (!settings.uploadsOpen) return toast('目前已停止投稿'); editingId = 'new'; render(); } if (action === 'edit-work') { editingId = id; render(); } if (action === 'close-editor') { if (event.target.closest('form')) return; editingId = null; render(); } if (action === 'vote') return toggleVote(id); if (action === 'toggle-setting') return saveSetting(key, !settings[key]); if (action === 'limit') return saveSetting('voteLimit', Math.min(10, Math.max(1, settings.voteLimit + Number(actionEl.dataset.delta)))); if (action === 'export') return exportResults(); if (action === 'export-logs') return exportLogs(); if (action === 'delete-work') return deleteWork(id); if (action === 'reset-votes') return resetVotes(); if (action === 'clear-works') return clearWorks(); });
+app.addEventListener('submit', (event) => { if (event.target.id === 'work-form') submitWork(event); });
+app.addEventListener('change', (event) => { if (event.target.name === 'image' && event.target.files[0]) { const box = event.target.closest('.upload-box'); box.querySelector('.upload-label').textContent = event.target.files[0].name; } });
+app.addEventListener('input', (event) => { if (event.target.id === 'search') { search = event.target.value; const start = event.target.selectionStart; render(); const field = document.querySelector('#search'); field.focus(); field.setSelectionRange(start, start); } });
+
+render();
+if (firebaseReady) onAuthStateChanged(auth, (currentUser) => {
+  user = currentUser;
+  stopListeners.forEach((stop) => stop());
+  stopListeners = [];
+  stopTallies?.();
+  stopTallies = null;
+  tallies = {};
+  if (user) stopListeners.push(onSnapshot(doc(db, 'ballots', user.uid), (snapshot) => {
+    votes = snapshot.exists() ? (snapshot.data().workIds || []).map((workId) => ({ workId })) : [];
+    render();
+  }));
+  else votes = [];
+  stopListeners.push(onSnapshot(query(collection(db, 'works'), orderBy('createdAt', 'desc')), (snapshot) => {
+    works = snapshot.docs.map((entry) => ({ id: entry.id, ...entry.data() }));
+    render();
+  }, (error) => toast(`讀取作品失敗：${error.message}`)));
+  stopListeners.push(onSnapshot(doc(db, 'settings', 'main'), (snapshot) => {
+    settings = { ...defaultSettings, ...(snapshot.data() || {}) };
+    if (!snapshot.exists() && isAdmin()) setDoc(doc(db, 'settings', 'main'), { ...defaultSettings, updatedAt: serverTimestamp() }, { merge: true });
+    stopTallies?.();
+    stopTallies = null;
+    if (settings.showVotes || isAdmin()) stopTallies = onSnapshot(collection(db, 'tallies'), (tallySnapshot) => {
+      tallies = Object.fromEntries(tallySnapshot.docs.map((entry) => [entry.id, entry.data()]));
+      render();
+    }, (error) => toast(`讀取票數失敗：${error.message}`));
+    else tallies = {};
+    render();
+  }, (error) => toast(`讀取活動設定失敗：${error.message}`)));
+  render();
+});
