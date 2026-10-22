@@ -13,7 +13,7 @@
 
 ## GitHub Pages 部署
 
-在 GitHub 儲存庫的 **Settings → Secrets and variables → Actions** 新增 `VITE_FIREBASE_API_KEY`、`VITE_FIREBASE_AUTH_DOMAIN`、`VITE_FIREBASE_PROJECT_ID`、`VITE_FIREBASE_APP_ID`、`VITE_ADMIN_EMAILS` 等 Repository variables，然後於 **Settings → Pages** 選擇 GitHub Actions 作為部署來源。GitHub Actions 會依儲存庫名稱自動設定 Pages 子路徑。
+GitHub Actions 工作流程已包含 Firebase Web App 公開設定，推送至 `main` 即會建置網站。第一次部署前，請在儲存庫 **Settings → Pages** 選擇 GitHub Actions 作為部署來源。工作流程會依儲存庫名稱自動設定 Pages 子路徑。
 
 ## Firebase 資料與安全
 
