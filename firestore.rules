@@ -10,17 +10,25 @@ service cloud.firestore {
         ? get(/databases/$(database)/documents/settings/main).data.voteLimit
         : 4;
     }
+    function uploadsOpen() {
+      return !exists(/databases/$(database)/documents/settings/main)
+        || get(/databases/$(database)/documents/settings/main).data.uploadsOpen == true;
+    }
+    function votingOpen() {
+      return !exists(/databases/$(database)/documents/settings/main)
+        || get(/databases/$(database)/documents/settings/main).data.votingOpen == true;
+    }
     match /settings/main {
       allow read: if true;
       allow write: if admin();
     }
     match /works/{workId} {
       allow read: if true;
-      allow create: if signedIn() && get(/databases/$(database)/documents/settings/main).data.uploadsOpen == true
+      allow create: if signedIn() && uploadsOpen()
         && request.resource.data.authorUid == request.auth.uid
         && request.resource.data.image.size() < 950000;
       allow update: if admin() || (signedIn() && resource.data.authorUid == request.auth.uid
-        && get(/databases/$(database)/documents/settings/main).data.uploadsOpen == true
+        && uploadsOpen()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title','description','category','image','updatedAt'])
         && request.resource.data.image.size() < 950000);
       allow delete: if admin();
@@ -41,7 +49,7 @@ service cloud.firestore {
       let removed = beforeIds.difference(afterIds);
       let isAdding = added.size() == 1 && workId in added;
       let isRemoving = removed.size() == 1 && workId in removed;
-      return signedIn() && get(/databases/$(database)/documents/settings/main).data.votingOpen == true
+      return signedIn() && votingOpen()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['count'])
         && ((isAdding && request.resource.data.count == resource.data.count + 1)
           || (isRemoving && request.resource.data.count == resource.data.count - 1));
@@ -49,12 +57,12 @@ service cloud.firestore {
     match /ballots/{uid} {
       allow read: if signedIn() && (request.auth.uid == uid || admin());
       allow create: if signedIn() && request.auth.uid == uid
-        && get(/databases/$(database)/documents/settings/main).data.votingOpen == true
+        && votingOpen()
         && request.resource.data.workIds.size() <= currentLimit()
         && request.resource.data.workIds.toSet().size() == request.resource.data.workIds.size()
         && request.resource.data.voterEmail == request.auth.token.email;
       allow update: if admin() || (signedIn() && request.auth.uid == uid
-        && get(/databases/$(database)/documents/settings/main).data.votingOpen == true
+        && votingOpen()
         && (request.resource.data.workIds.size() <= currentLimit()
           || request.resource.data.workIds.size() < resource.data.workIds.size())
         && request.resource.data.workIds.toSet().size() == request.resource.data.workIds.size()
