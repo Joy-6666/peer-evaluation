@@ -30,7 +30,7 @@ jobs:
           VITE_FIREBASE_AUTH_DOMAIN: peer-evaluation-38f59.firebaseapp.com
           VITE_FIREBASE_PROJECT_ID: peer-evaluation-38f59
           VITE_FIREBASE_APP_ID: 1:210925957010:web:5de2ef9c8c4eff53241b4b
-          VITE_ADMIN_EMAILS: jau@go.ypmhs.tyc.edu.tw
+          VITE_ADMIN_EMAILS: jau@go.pymhs.tyc.edu.tw
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
